@@ -1,0 +1,194 @@
+import pandas as pd
+import matplotlib.pyplot as plt
+from mpl_toolkits.basemap import Basemap
+import numpy as np
+
+def get_data(path_to_data, chunk='all'):
+    '''
+    This function extracts the data from csv file to pandas dataframe
+    '''
+    if chunk == 'all':
+        dwdata = pd.read_csv(path_to_data)
+    else:
+        dwdata = pd.read_csv(path_to_data, nrows = chunk)
+		
+    return dwdata
+
+def format_clean(data):
+    '''
+    This function does some basic transformation on data
+    We want to remove the 'Withdrawn' from the target labeled dataset 
+    and merge 'Certified-Withdrawn' with 'Certified' in 
+    order to make the y_labels/targets binary 
+    '''
+    data2 = data.drop('Unnamed: 0', axis = 1)
+    df1 = data2[data2['CASE_STATUS']!='WITHDRAWN']
+    df2 =df1[df1['CASE_STATUS']!='CERTIFIED-WITHDRAWN']
+    
+    #ONE-HOT Encoding of 
+    df3 = pd.get_dummies(df2.drop('CASE_STATUS', axis = 1))
+    df4 = pd.concat([df3, df2['CASE_STATUS']], axis=1)
+    df5 = df4.dropna()
+    
+    return df5
+
+
+def visualize(data):
+    f1, ax1 = plt.subplots(1)
+    lons,lats = data['lon'].values,data['lat'].values
+    # llcrnrlat,llcrnrlon,urcrnrlat,urcrnrlon
+    # are the lat/lon values of the lower left and upper right corners
+    # of the map.
+    # lat_ts is the latitude of true scale.
+    # resolution = 'c' means use crude resolution coastlines.
+    m = Basemap(projection='merc',llcrnrlat=20,urcrnrlat=55,
+            llcrnrlon=-135,urcrnrlon=-60,lat_ts=20,resolution='l')
+    m.drawcoastlines()
+    m.drawstates()
+    m.drawcountries()
+    #m.drawmapboundary(fill_color='aqua')
+    x,y = m(lons,lats)
+    m.scatter(x,y,marker='o')
+    plt.title("Mercator Projection of H-1B Visa Destinations")
+    
+    
+    
+    f3, ax3 = plt.subplots(1)
+    data.hist('PREVAILING_WAGE', bins = 1000, ax=ax3)
+    ax3.set_xlim([0,150000])
+    ax3.set_xlabel('Wage ($)')
+    ax3.set_ylabel('Number of Applicants')
+
+    plt.show()
+    
+    
+    #additions for DNN
+    
+    #Predict whether a person will be certified or denied
+import pandas as pd
+import matplotlib.pyplot as plt
+import h1bfunctions
+from h1b_tensor import DeepNN
+from sklearn import preprocessing
+from sklearn.model_selection import train_test_split
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import accuracy_score
+from datetime import datetime
+
+start_time = datetime.now() #for timing the script
+
+#dataset path
+data_set_path = 'h1b_kaggle.csv'
+
+#extract the data 
+chunks = 10000 #number of data rows want to use
+data_set = h1bfunctions.get_data(data_set_path, chunk = chunks)
+
+#clean the data
+new_data = h1bfunctions.format_clean(data_set)
+
+#split the data
+xs = new_data.drop('CASE_STATUS', axis = 1)  
+ys = new_data['CASE_STATUS']
+X_train, X_test, y_train, y_test = train_test_split(xs,ys, test_size=0.30)
+
+#summary statistics
+print(xs.describe())
+print(ys.describe())
+
+#Transform and Scale Data
+scaler = preprocessing.StandardScaler()
+scaler.fit(X_train)
+
+#Logistic Regression
+LR = LogisticRegression()
+LR.fit(scaler.transform(X_train), y_train)
+y_pred=LR.predict(scaler.transform(X_test))
+
+#Deep Neural Net
+y_train_codes = y_train.astype('category').cat.codes #convert y_training labels (certified = 0, denied = 1)
+y_test_codes = y_test.astype('category').cat.codes
+dnn_acc = DeepNN(X_train.values, y_train_codes.values.astype(int), X_test.values, y_test_codes.values.astype(int))
+
+#Accuracy Measurements
+print("\n"+"The accuracy of the Logistic Model is {}".format(accuracy_score(y_test,y_pred)))
+print("The accuracy of the Deep Neural Net for training data is {}".format(dnn_acc[0]))
+print("The accuracy of the Deep Neural Net for test set is {}".format(dnn_acc[1]))
+
+print("\n"+"Runtime: {}".format(datetime.now()-start_time)) 
+
+#Visuallizations
+#h1bfunctions.visualize(xs)
+
+
+#addition mini batch
+
+import numpy as np
+import tensorflow as tf
+import pandas as pd
+from tensorflow.contrib.layers import fully_connected
+from datetime import datetime
+
+def DeepNN(X_train, y_train, X_test, y_test):
+    
+    #Construction Phase
+    now=datetime.utcnow().strftime("%Y%m%d%H%M%S")
+    root_logdir = "tf_logs"
+    logdir = "{}/run-{}/".format(root_logdir, now)
+    
+    ##network parameters
+    n_inputs = X_train.shape[1] #dimension of dataframe columns
+    n_hidden1 = 10
+    n_hidden2 = 10
+    n_outputs = 2 #dimension of possible outcomes (notcert=0,cert=1)
+
+    ##placeholders
+    X = tf.placeholder(X_train.dtype, shape=(None,n_inputs))
+    y = tf.placeholder(tf.int64)
+
+    ##Neuron Layers
+    with tf.name_scope("dnn"):
+        hidden1 = fully_connected(X, n_hidden1)
+        hidden2 = fully_connected(hidden1, n_hidden2)
+        logits = fully_connected(hidden2, n_outputs, activation_fn=None)
+
+    with tf.name_scope("loss"):
+        xentropy=tf.nn.sparse_softmax_cross_entropy_with_logits(labels = y, logits=logits)
+        loss = tf.reduce_mean(xentropy)
+
+    with tf.name_scope("train"):
+        optimizer = tf.train.GradientDescentOptimizer(0.001)
+        training_op = optimizer.minimize(loss)
+
+    with tf.name_scope("eval"):
+        correct = tf.nn.in_top_k(tf.cast(logits, dtype=tf.float32), tf.cast(y, dtype=tf.int32), 1)
+        accuracy = tf.reduce_mean(tf.cast(correct, tf.float32))
+
+    loss_summary = tf.summary.scalar('XentropyLoss', loss)
+    file_writer = tf.summary.FileWriter(logdir, tf.get_default_graph())
+        
+    #Execution Phase
+    def batch_getter(batch_size, X, y):
+        rand_ind = np.random.randint(0,X.shape[0],batch_size)
+        x_batch = X[rand_ind,:]
+        y_batch = y[rand_ind]
+        return x_batch, y_batch
+
+    n_epochs = 100
+    batch_size = 50
+
+    init = tf.global_variables_initializer()
+    #train Neural Network
+    with tf.Session() as sess:
+        init.run()
+        for epoch in range(n_epochs):
+            X_bat, y_bat = batch_getter(batch_size, X_train, y_train)
+            feed = {X:X_bat, y: y_bat}
+            sess.run(training_op, feed_dict=feed)
+            summary_str = loss_summary.eval(feed_dict=feed)
+            file_writer.add_summary(summary_str, epoch)
+        acc_train = accuracy.eval(feed_dict=feed)
+        acc_test = accuracy.eval(feed_dict = {X:X_test, y:y_test})
+    
+        
+    return acc_train, acc_test
